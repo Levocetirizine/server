@@ -44,6 +44,17 @@ corresponds to the 21.06 release of the tritonserver container on
 release is
 [r21.06](https://github.com/triton-inference-server/server/tree/r21.06).
 
+## [MOD] Enhanced emsemble graph support based on r21.06
+A mod was made for adding dynamic graph support for ensemble model.
+Check [enhanced_ensemble_model](docs/enhanced_ensemble_model.md) for
+more information.
+
+Please notice the triton common repo was also modified. This can induce
+conflict when building the original backends. Hence a skip option was added 
+to build.py to allow the backend to be built separately.
+
+Check the .md file for usage.
+
 ## What's New in 2.11.0
 
 * The [Forest Inference Library (FIL)](https://github.com/triton-inference-server/fil_backend) 
