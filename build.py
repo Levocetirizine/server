@@ -1183,6 +1183,14 @@ if __name__ == '__main__':
                         action="store_true",
                         required=False,
                         help='Enable GPU support.')
+    parser.add_argument('--no-backend-build',
+                        action="store_true",
+                        required=False,
+                        help='Skips backend building.')                        
+    parser.add_argument('--no-agent-build',
+                        action="store_true",
+                        required=False,
+                        help='Skips agent building.')                             
     parser.add_argument(
         '--min-compute-capability',
         type=str,
@@ -1394,44 +1402,50 @@ if __name__ == '__main__':
         cpdir(repo_install_dir, core_install_dir)
 
     # Build each backend...
-    for be in backends:
-        # Core backends are not built separately from core so skip...
-        if (be in CORE_BACKENDS):
-            continue
+    if not FLAGS.no_backend_build:
+        for be in backends:
+            # Core backends are not built separately from core so skip...
+            if (be in CORE_BACKENDS):
+                continue
 
-        repo_build_dir = os.path.join(FLAGS.build_dir, be, 'build')
-        repo_install_dir = os.path.join(FLAGS.build_dir, be, 'install')
+            if (be == 'onnxruntime') and (target_platform() == 'jetpack') and ('onnxruntime' not in library_paths):
+                log('ORT not found, skip onnx build for Jetson')
+                continue
 
-        mkdir(FLAGS.build_dir)
-        gitclone(FLAGS.build_dir, backend_repo(be), backends[be], be)
-        mkdir(repo_build_dir)
-        cmake(
-            repo_build_dir,
-            backend_cmake_args(images, components, be, repo_install_dir,
-                               library_paths))
-        makeinstall(repo_build_dir)
+            repo_build_dir = os.path.join(FLAGS.build_dir, be, 'build')
+            repo_install_dir = os.path.join(FLAGS.build_dir, be, 'install')
 
-        backend_install_dir = os.path.join(FLAGS.install_dir, 'backends', be)
-        rmdir(backend_install_dir)
-        mkdir(backend_install_dir)
-        cpdir(os.path.join(repo_install_dir, 'backends', be),
-              backend_install_dir)
+            mkdir(FLAGS.build_dir)
+            gitclone(FLAGS.build_dir, backend_repo(be), backends[be], be)
+            mkdir(repo_build_dir)
+            cmake(
+                repo_build_dir,
+                backend_cmake_args(images, components, be, repo_install_dir,
+                                library_paths))
+            makeinstall(repo_build_dir)
+
+            backend_install_dir = os.path.join(FLAGS.install_dir, 'backends', be)
+            rmdir(backend_install_dir)
+            mkdir(backend_install_dir)
+            cpdir(os.path.join(repo_install_dir, 'backends', be),
+                backend_install_dir)
 
     # Build each repo agent...
-    for ra in repoagents:
-        repo_build_dir = os.path.join(FLAGS.build_dir, ra, 'build')
-        repo_install_dir = os.path.join(FLAGS.build_dir, ra, 'install')
+    if not FLAGS.no_agent_build:
+        for ra in repoagents:
+            repo_build_dir = os.path.join(FLAGS.build_dir, ra, 'build')
+            repo_install_dir = os.path.join(FLAGS.build_dir, ra, 'install')
 
-        mkdir(FLAGS.build_dir)
-        gitclone(FLAGS.build_dir, repoagent_repo(ra), repoagents[ra], ra)
-        mkdir(repo_build_dir)
-        cmake(repo_build_dir,
-              repoagent_cmake_args(images, components, ra, repo_install_dir))
-        makeinstall(repo_build_dir)
+            mkdir(FLAGS.build_dir)
+            gitclone(FLAGS.build_dir, repoagent_repo(ra), repoagents[ra], ra)
+            mkdir(repo_build_dir)
+            cmake(repo_build_dir,
+                repoagent_cmake_args(images, components, ra, repo_install_dir))
+            makeinstall(repo_build_dir)
 
-        repoagent_install_dir = os.path.join(FLAGS.install_dir, 'repoagents',
-                                             ra)
-        rmdir(repoagent_install_dir)
-        mkdir(repoagent_install_dir)
-        cpdir(os.path.join(repo_install_dir, 'repoagents', ra),
-              repoagent_install_dir)
+            repoagent_install_dir = os.path.join(FLAGS.install_dir, 'repoagents',
+                                                ra)
+            rmdir(repoagent_install_dir)
+            mkdir(repoagent_install_dir)
+            cpdir(os.path.join(repo_install_dir, 'repoagents', ra),
+                repoagent_install_dir)
