@@ -95,6 +95,12 @@ BuildEnsembleGraph(
           "must specify 'output_map' in step " + std::to_string(step_idx) +
               " of ensemble '" + config.name() + "'");
     }
+    if (element.control_output_map().size() != 0) {
+      return Status(
+          Status::Code::INVALID_ARG,
+          "control output is not allowed when dynamic_enabled unset in step " + std::to_string(step_idx) +
+              " of ensemble '" + config.name() + "'");
+    }
 
     // Link ensemble tensors
     std::vector<EnsembleTensor*> tensor_as_output;
@@ -150,6 +156,48 @@ BuildEnsembleGraph(
   return Status::Success;
 }
 
+/// only do basic graph check for each step
+Status
+ValidateEnsembleSchedulingDynamicGraphConfig(const inference::ModelConfig& config)
+{
+  size_t step_idx = 0;
+  for (const auto& element : config.ensemble_scheduling().step()) {
+    if (element.model_name().empty()) {
+      return Status(
+          Status::Code::INVALID_ARG,
+          "must specify 'model_name' in step " + std::to_string(step_idx) +
+              " of ensemble '" + config.name() + "'");
+    }
+    if (element.input_map().size() == 0) {
+      return Status(
+          Status::Code::INVALID_ARG,
+          "must specify 'input_map' in step " + std::to_string(step_idx) +
+              " of ensemble '" + config.name() + "'");
+    }
+    if (element.output_map().size() == 0) {
+      return Status(
+          Status::Code::INVALID_ARG,
+          "must specify 'output_map' in step " + std::to_string(step_idx) +
+              " of ensemble '" + config.name() + "'");
+    }
+    for (const auto& pair : element.control_output_map()) {
+      
+      auto it = element.output_map().find(pair.second);
+      if (it == element.output_map().end()) {
+        return Status(
+            Status::Code::INVALID_ARG,
+            "control tensor " + pair.first + 
+            " in step " + std::to_string(step_idx) +
+            " do not map to any internal output tensor " +
+            " of ensemble '" + config.name() + "'");        
+      }
+    }
+    step_idx++;
+  }
+
+  return Status::Success;
+}
+
 Status
 ValidateEnsembleSchedulingConfig(const inference::ModelConfig& config)
 {
@@ -183,6 +231,11 @@ ValidateEnsembleSchedulingConfig(const inference::ModelConfig& config)
     return Status(
         Status::Code::INVALID_ARG,
         "must specify 'step' for ensemble '" + config.name() + "'");
+  }
+
+  if (config.dynamic_enabled()) {
+    LOG_VERBOSE(1) << "dynamic enabled, run basic graph check";
+    return ValidateEnsembleSchedulingDynamicGraphConfig(config);
   }
 
   std::unordered_map<std::string, EnsembleTensor> tensors;

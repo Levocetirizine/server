@@ -57,11 +57,14 @@ struct EnsembleInfo {
     int64_t model_version_;
     std::unordered_map<std::string, std::string> input_to_tensor_;
     std::unordered_map<std::string, std::string> output_to_tensor_;
+    std::unordered_map<std::string, std::string> control_output_;
   };
 
   std::string ensemble_name_;
 
   bool is_decoupled_;
+
+  bool dynamic_enabled_;
 
   // the ensemble output (re)shape expected by the ensemble
   std::unordered_map<std::string, DimsList> ensemble_output_shape_;

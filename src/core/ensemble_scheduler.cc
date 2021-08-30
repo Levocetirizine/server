@@ -293,6 +293,13 @@ class EnsembleContext {
       const std::set<std::pair<std::string, IterationCount>>& updated_tensors,
       std::unique_ptr<InferenceResponse>* response);
 
+  static void UpdateControlTensor(
+      TRITONSERVER_InferenceResponse* response, const uint32_t count,
+      const std::unique_ptr<Step> &step_ptr,
+      const std::unordered_map<std::string, std::string> &control_output_,
+      std::unordered_map<std::string, std::string> *control_map
+  );
+
   InferenceServer* is_;
 
   EnsembleInfo* info_;
@@ -376,11 +383,14 @@ EnsembleContext::EnsembleContext(
 
   // Prune ensemble first if not all outputs are requested
   std::set<std::string> ignored_tensor;
-  for (const auto& ensemble_output : info_->ensemble_output_shape_) {
-    ignored_tensor.insert(ensemble_output.first);
-  }
-  for (const auto& requested_output : lrequest->ImmutableRequestedOutputs()) {
-    ignored_tensor.erase(requested_output);
+
+  if (!info_->dynamic_enabled_) {
+    for (const auto& ensemble_output : info_->ensemble_output_shape_) {
+      ignored_tensor.insert(ensemble_output.first);
+    }
+    for (const auto& requested_output : lrequest->ImmutableRequestedOutputs()) {
+      ignored_tensor.erase(requested_output);
+    }
   }
   if (ignored_tensor.empty()) {
     tensor_to_step_ = &(info_->tensor_to_step_);
@@ -546,12 +556,90 @@ EnsembleContext::RequestComplete(
   }
 }
 
+void 
+EnsembleContext::UpdateControlTensor(
+    TRITONSERVER_InferenceResponse* response, const uint32_t count,
+    const std::unique_ptr<Step> &step_ptr,
+    const std::unordered_map<std::string, std::string> &control_output_,
+    std::unordered_map<std::string, std::string> *control_map
+)
+{
+  auto& tensor_data = step_ptr->ctx_->tensor_data_;
+  for (uint32_t idx = 0; idx < count; idx++) {
+    const char* name;
+    TRITONSERVER_DataType datatype;
+    const int64_t* shape;
+    uint64_t dim_count;
+    const void* base;
+    size_t byte_size;
+    TRITONSERVER_MemoryType memory_type;
+    int64_t memory_type_id;
+    void* userp;
+    auto err = TRITONSERVER_InferenceResponseOutput(
+        response, idx, &name, &datatype, &shape, &dim_count, &base,
+        &byte_size, &memory_type, &memory_type_id, &userp);
+
+    auto it = control_output_.find(name);
+    if (it != control_output_.end()) {
+      /* Extract control info from output data */
+      auto& controlled_pad = it->second;
+
+      if (byte_size != 0) {
+        std::shared_ptr<AllocatedMemory> ctl_data;
+        std::lock_guard<std::mutex> output_lk(step_ptr->output_mtx_);
+        if (memory_type == TRITONSERVER_MEMORY_GPU) {
+          auto& gpu_output_map =
+            step_ptr->gpu_output_map_[memory_type_id];
+          auto it =
+            gpu_output_map.find(reinterpret_cast<uintptr_t>(base));
+          ctl_data = std::move(it->second);
+          gpu_output_map.erase(it);
+        } else {
+          auto it = step_ptr->cpu_output_map_.find(
+              reinterpret_cast<uintptr_t>(base));
+          ctl_data = std::move(it->second);
+          step_ptr->cpu_output_map_.erase(it);
+        }
+
+        /* get control string */
+        if (dim_count == 1 && shape[0] == 1 && datatype == TRITONSERVER_TYPE_BYTES) {
+          if (ctl_data->BufferCount() == 1) {
+            std::string next_tensor;
+            size_t byte_size;
+            TRITONSERVER_MemoryType memory_type;
+            int64_t memory_type_id;
+            auto buf = ctl_data->BufferAt(0, &byte_size, &memory_type, &memory_type_id);
+            next_tensor.append(buf + 4, byte_size - 4);
+            auto it = tensor_data.find(next_tensor);
+            if (next_tensor == "none" || it != tensor_data.end()) {
+              LOG_VERBOSE(1) << "Dynamic map: " << controlled_pad << " -> " << next_tensor;
+              control_map->emplace(controlled_pad, next_tensor);
+            } else {
+              LOG_WARNING << next_tensor << " do not exist in ensemble model";
+            }
+          } else {
+            LOG_WARNING << "Illigal buffer count " << ctl_data->BufferCount() << " for control output";
+          }
+        } else {
+          LOG_WARNING << "Illigal control output shape, should be [ 1 ] TYPE_STRING ";
+        }
+      }
+    }
+    if (err != nullptr) {
+      break;
+    }
+  }
+}
+
 void
 EnsembleContext::ResponseComplete(
     TRITONSERVER_InferenceResponse* response, const uint32_t flags, void* userp)
 {
   auto step_ptr = std::unique_ptr<Step>(reinterpret_cast<Step*>(userp));
   step_ptr->response_flags_ = flags;
+
+  // auto model_info = step_ptr->ctx_->info_;
+  // auto &model_name = model_info->steps_[step_ptr->step_idx_].model_name_;
 
   if (response != nullptr) {
     auto err = TRITONSERVER_InferenceResponseError(response);
@@ -615,6 +703,17 @@ EnsembleContext::ResponseComplete(
         auto& output_to_tensor =
             step_ptr->ctx_->info_->steps_[step_ptr->step_idx_]
                 .output_to_tensor_;
+        auto& control_output_ =
+            step_ptr->ctx_->info_->steps_[step_ptr->step_idx_]
+                .control_output_;
+        // auto& tensor_data = 
+        //     step_ptr->ctx_->tensor_data_;
+
+        /* Iterate and build output map from control tensor */
+        std::unordered_map<std::string, std::string> control_map;
+        UpdateControlTensor(response, count, step_ptr, control_output_, &control_map);
+
+        /* Iterate output tensor */
         for (uint32_t idx = 0; idx < count; idx++) {
           const char* name;
           TRITONSERVER_DataType datatype;
@@ -628,14 +727,17 @@ EnsembleContext::ResponseComplete(
           err = TRITONSERVER_InferenceResponseOutput(
               response, idx, &name, &datatype, &shape, &dim_count, &base,
               &byte_size, &memory_type, &memory_type_id, &userp);
-          if (err == nullptr) {
+          if (err == nullptr && control_output_.find(name) == control_output_.end()) { /* Controller tensor shall be skipped */
             auto it = output_to_tensor.find(name);
             if (it != output_to_tensor.end()) {
-              std::unique_ptr<InferenceRequest::Input> tensor(
-                  new InferenceRequest::Input(
-                      it->second, TritonToDataType(datatype), shape,
-                      dim_count));
-
+              std::string& next_tensor = it->second;
+              auto control_map_it = control_map.find(name);
+              /* override the output tensor name */
+              if (control_map_it != control_map.end()) {
+                next_tensor = control_map_it->second;
+              }
+              LOG_VERBOSE(1) << "Map " << name << " to " << next_tensor;
+              std::shared_ptr<AllocatedMemory> out_data;
               if (byte_size != 0) {
                 std::lock_guard<std::mutex> output_lk(step_ptr->output_mtx_);
                 if (memory_type == TRITONSERVER_MEMORY_GPU) {
@@ -643,27 +745,39 @@ EnsembleContext::ResponseComplete(
                       step_ptr->gpu_output_map_[memory_type_id];
                   auto it =
                       gpu_output_map.find(reinterpret_cast<uintptr_t>(base));
-                  tensor->SetData(std::move(it->second));
+                  out_data = std::move(it->second);
                   gpu_output_map.erase(it);
                 } else {
                   auto it = step_ptr->cpu_output_map_.find(
                       reinterpret_cast<uintptr_t>(base));
-                  tensor->SetData(std::move(it->second));
+                  out_data = std::move(it->second);
                   step_ptr->cpu_output_map_.erase(it);
                 }
               }
 
-              auto& tensor_data = step_ptr->ctx_->tensor_data_[it->second];
-              if (parameter_override) {
-                step_ptr->updated_tensors_.emplace(
-                    it->second, tensor_data.AddTensor(
-                                    std::move(tensor), correlation_id, flags));
+              if (next_tensor != "none") {
+                /* Create new tensor and set tensor data */
+                std::unique_ptr<InferenceRequest::Input> tensor(
+                    new InferenceRequest::Input(
+                        next_tensor, TritonToDataType(datatype), shape,
+                        dim_count));   
+
+                tensor->SetData(std::move(out_data));           
+
+                auto& tensor_data = step_ptr->ctx_->tensor_data_[next_tensor];
+                if (parameter_override) {
+                  step_ptr->updated_tensors_.emplace(
+                      next_tensor, tensor_data.AddTensor(
+                                      std::move(tensor), correlation_id, flags));
+                } else {
+                  step_ptr->updated_tensors_.emplace(
+                      next_tensor,
+                      tensor_data.AddTensor(
+                          std::move(tensor), step_ptr->correlation_id_,
+                          step_ptr->flags_));
+                }
               } else {
-                step_ptr->updated_tensors_.emplace(
-                    it->second,
-                    tensor_data.AddTensor(
-                        std::move(tensor), step_ptr->correlation_id_,
-                        step_ptr->flags_));
+                LOG_VERBOSE(1) << "Clear empty tensor " << name;
               }
             } else {
               LOG_VERBOSE(1)
@@ -817,6 +931,8 @@ EnsembleContext::InitStep(
 
   const bool allow_batching = (backend->Config().max_batch_size() > 0);
 
+  // LOG_INFO << "Init step " << istep.model_name_ << " with iteration " << iteration_count;
+
   auto irequest = std::unique_ptr<InferenceRequest>(
       new InferenceRequest(backend, istep.model_version_));
 
@@ -872,6 +988,10 @@ EnsembleContext::InitStep(
 
   // Set requested outputs in request header
   for (const auto& pair : istep.output_to_tensor_) {
+    irequest->AddOriginalRequestedOutput(pair.first);
+  }
+
+  for (const auto& pair : istep.control_output_) {
     irequest->AddOriginalRequestedOutput(pair.first);
   }
 
@@ -1223,6 +1343,7 @@ EnsembleScheduler::EnsembleScheduler(
   info_.reset(new EnsembleInfo());
 
   info_->ensemble_name_ = config.name();
+  info_->dynamic_enabled_ = config.dynamic_enabled();
 
   // This config field is filled internally for ensemble models
   info_->is_decoupled_ = config.model_transaction_policy().decoupled();
@@ -1264,6 +1385,12 @@ EnsembleScheduler::EnsembleScheduler(
           std::make_pair(pair.first, pair.second));
 
       info_->tensor_to_prev_step_.emplace(pair.second, step_idx);
+    }
+
+    /* Control output should not be stored in TensorData */
+    for (const auto& pair : element.control_output_map()) {
+      LOG_VERBOSE(1) << "Add control output " << pair.first << " - " << pair.second;
+      info_->steps_[step_idx].control_output_.emplace(pair.first, pair.second);
     }
   }
 }

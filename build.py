@@ -83,6 +83,7 @@ NONCORE_BACKENDS = [
 EXAMPLE_REPOAGENTS = ['checksum']
 FLAGS = None
 
+custom_git_dict = {}
 
 def log(msg, force=False):
     if force or not FLAGS.quiet:
@@ -127,6 +128,15 @@ def cpdir(src, dest):
     log_verbose('cpdir: {} -> {}'.format(src, dest))
     copy_tree(src, dest, preserve_symlinks=1)
 
+def get_custom_github_repo(repo):
+    if not custom_git_dict:
+        return FLAGS.github_organization
+
+    for git in custom_git_dict:
+        if git == repo:
+            return custom_git_dict[repo]
+
+    return FLAGS.github_organization
 
 def untar(targetdir, tarfile):
     log_verbose('untar {} into {}'.format(tarfile, targetdir))
@@ -145,7 +155,7 @@ def gitclone(cwd, repo, tag, subdir):
         log_verbose('git clone of repo "{}" at ref "{}"'.format(repo, tag))
         p = subprocess.Popen([
             'git', 'clone', '--recursive', '--depth=1', '{}/{}.git'.format(
-                FLAGS.github_organization, repo), subdir
+                get_custom_github_repo(repo), repo), subdir
         ],
                              cwd=cwd)
         p.wait()
@@ -277,6 +287,14 @@ def core_cmake_args(components, backends, install_dir):
                 pass
             else:
                 fail('unknown core backend {}'.format(be))
+
+    for git in custom_git_dict:
+        if git == 'common':
+            cargs.append('-DTRITON_COMMON_GIT:STRING={}/common.git'.format(custom_git_dict[git]))
+        elif git == 'core':
+            cargs.append('-DTRITON_CORE_GIT:STRING={}/core.git'.format(custom_git_dict[git]))
+        elif git == 'backend':
+            cargs.append('-DTRITON_BACKEND_GIT:STRING={}/backend.git'.format(custom_git_dict[git]))
 
     # If TRITONBUILD_* is defined in the env then we use it to set
     # corresponding cmake value.
@@ -1207,6 +1225,13 @@ if __name__ == '__main__':
         help=
         'Include specified repo agent in build as <repoagent-name>[:<repo-tag>]. If <repo-tag> starts with "pull/" then it refers to a pull-request reference, otherwise <repo-tag> indicates the git tag/branch to use for the build. If the version is non-development then the default <repo-tag> is the release branch matching the container version (e.g. version 21.06 -> branch r21.06); otherwise the default <repo-tag> is "main" (e.g. version 21.06dev -> branch main).'
     )
+    parser.add_argument(
+        '--custom-repo',
+        action='append',
+        required=False,
+        help=
+        'Override repo with customed address.\n Usage:"mybackend:https://github.com/mygithubrepo"'
+    )
 
     FLAGS = parser.parse_args()
 
@@ -1224,6 +1249,8 @@ if __name__ == '__main__':
         FLAGS.repoagent = []
     if FLAGS.library_paths is None:
         FLAGS.library_paths = []
+    if FLAGS.custom_repo is None:
+        FLAGS.custom_repo = []
 
     # FLAGS.cmake_dir is required for non-container builds. For
     # container builds it is set above to the value appropriate for
@@ -1271,6 +1298,13 @@ if __name__ == '__main__':
             parts.append(default_repo_tag)
         log('backend "{}" at tag/branch "{}"'.format(parts[0], parts[1]))
         backends[parts[0]] = parts[1]
+
+    # Init map of custom git repos
+    custom_git_dict.clear()
+    for git in FLAGS.custom_repo:
+        parts = git.split(':', 1)
+        log('custom git url {} for repo {}'.format(parts[1], parts[0]))
+        custom_git_dict[parts[0]] = parts[1]
 
     # Initialize map of repo agents to build and repo-tag for each.
     repoagents = {}
