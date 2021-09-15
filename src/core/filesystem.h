@@ -119,6 +119,13 @@ Status GetDirectoryContents(
 Status GetDirectorySubdirs(
     const std::string& path, std::set<std::string>* subdirs);
 
+/// Get the possible model repo dirs under a path.
+/// \param path The path.
+/// \param subdirs Returns the names of the repo-directories (contains config.pbtxt).
+/// \return Error status
+Status GetPossibleRepoDirs(
+    const std::string& path, const std::string& ns, std::set<std::string>* repodirs);
+
 /// Get the files contained in a directory.
 /// \param path The directory.
 /// \param skip_hidden_files Ignores the hidden files in the directory.

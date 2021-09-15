@@ -655,7 +655,8 @@ GetTypedSequenceControlProperties(
 
 Status
 GetNormalizedModelConfig(
-    const std::string& path, const BackendConfigMap& backend_config_map,
+    const std::string& path, const std::string& ns_path,
+    const BackendConfigMap& backend_config_map,
     const bool autofill, const double min_compute_capability,
     inference::ModelConfig* config)
 {
@@ -669,12 +670,40 @@ GetNormalizedModelConfig(
     RETURN_IF_ERROR(ReadTextProto(config_path, config));
   }
 
-  // If the model name is not given in the configuration, set if based
-  // on the model path.
-  const std::string model_name(BaseName(path));
-  if (config->name().empty()) {
-    config->set_name(model_name);
+  // Validate model name in configuration file
+  if (!config->name().empty()) {
+    auto mlen = ns_path.length();
+    auto clen = config->name().length();
+    if (mlen < clen || ns_path.compare(mlen - clen, clen, config->name())) {
+      LOG_ERROR << "model name " << config->name() << " do not match model directory " << ns_path;
+      return Status(
+        Status::Code::INVALID_ARG,
+        "model name " + config->name() + 
+        " do not match model directory " + ns_path);
+    }
   }
+
+  // Replace model name by replacing '/' to '.'
+  std::string model_name = ModelNameSlashToDot(ns_path);
+  config->set_name(model_name);
+
+#ifdef TRITON_ENABLE_ENSEMBLE
+  // Add namespace to step names for ensemble model
+  if (config->platform() == kEnsemblePlatform) {
+    if (config->has_ensemble_scheduling()) {
+      for (auto& element : *(config->mutable_ensemble_scheduling()->mutable_step())) {
+        const auto& old_name = element.model_name();
+        if(!old_name.empty() && old_name.find('.') == old_name.npos) {
+          if(ns_path.find('/') != ns_path.npos) {
+            std::string ns = DirName(ns_path);
+            std::string new_name = ModelNameSlashToDot(ns) + '.' + old_name;
+            element.set_model_name(new_name);
+          }
+        }        
+      }
+    }
+  }
+#endif  // TRITON_ENABLE_ENSEMBLE  
 
   // FIXME need to check other Triton components on how they retrieve model
   // config. The new workflow will let model backend contains the most updated
@@ -1877,6 +1906,35 @@ JsonToModelConfig(
   options.ignore_unknown_fields = false;
   ::google::protobuf::util::JsonStringToMessage(
       json_config, protobuf_config, options);
+  return Status::Success;
+}
+
+std::string ModelNameDotToSlash(const std::string& dot_str)
+{
+  auto slash_str = dot_str;
+  std::replace(slash_str.begin(), slash_str.end(), '.', '/');
+  return slash_str;
+}
+
+std::string ModelNameSlashToDot(const std::string& slash_str)
+{
+  auto dot_str = slash_str;
+  std::replace(dot_str.begin(), dot_str.end(), '/', '.');
+  return dot_str;
+}
+
+Status 
+ValidateModelName(const std::string& model_name)
+{
+  for (const char& c : model_name) {
+    for (const char& kc : kReservedModelNameChar) {
+      if (c == kc) {
+        return Status(Status::Code::INVALID_ARG,
+          std::string("Illegal character ") + kc + 
+          std::string(" in model name ") + model_name);
+      }
+    }
+  }
   return Status::Success;
 }
 

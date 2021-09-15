@@ -326,6 +326,13 @@ class ModelRepositoryManager {
       missing_nodes_;
 
   std::unique_ptr<BackendLifeCycle> backend_life_cycle_;
+
+  template<class T>
+  void dump_set_element(const std::set<T>& set);
+
+  template<class K, class V>
+  void dump_map_element(const std::map<K, V>& map);
+
 };
 
 }}  // namespace nvidia::inferenceserver

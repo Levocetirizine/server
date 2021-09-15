@@ -68,6 +68,7 @@ Status GetTypedSequenceControlProperties(
 /// Read a ModelConfig and normalize it as expected by model backends.
 /// \param path The full-path to the directory containing the
 /// model configuration.
+/// \param ns_path Model directory in repo (with namespace)
 /// \param backend_config_map Map from platform name to the backend
 /// configuration for that platform.
 /// \param autofill If true attempt to determine any missing required
@@ -77,7 +78,8 @@ Status GetTypedSequenceControlProperties(
 /// \param config Returns the normalized model configuration.
 /// \return The error status.
 Status GetNormalizedModelConfig(
-    const std::string& path, const BackendConfigMap& backend_config_map,
+    const std::string& path, const std::string& ns_path,
+    const BackendConfigMap& backend_config_map,
     const bool autofill, const double min_compute_capability,
     inference::ModelConfig* config);
 
@@ -194,5 +196,17 @@ Status ModelConfigToJson(
 Status JsonToModelConfig(
     const std::string& json_config, const uint32_t config_version,
     inference::ModelConfig* protobuf_config);
+
+/// Convert dot separated modelname to slash separated modelname.
+/// \param dot_str Model name
+std::string ModelNameDotToSlash(const std::string& dot_str);
+
+/// Convert dot separated modelname to slash separated modelname.
+/// \param slash_str Model name
+std::string ModelNameSlashToDot(const std::string& slash_str);
+
+/// Validate model name
+/// \param model_name Model name
+Status ValidateModelName(const std::string& model_name);
 
 }}  // namespace nvidia::inferenceserver

@@ -63,7 +63,7 @@ TritonModel::Create(
   // so that it persists as long as the model is loaded.
   std::shared_ptr<LocalizedDirectory> localized_model_dir;
   RETURN_IF_ERROR(LocalizeDirectory(
-      JoinPath({model_repository_path, model_name}), &localized_model_dir));
+      JoinPath({model_repository_path, ModelNameDotToSlash(model_name)}), &localized_model_dir));
 
   // Get some internal configuration values needed for initialization.
   std::string backend_dir;

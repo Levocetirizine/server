@@ -185,7 +185,7 @@ VersionsToLoad(
   versions->clear();
 
   // Get integral number of the version directory
-  const auto model_path = JoinPath({model_repository_path, name});
+  const auto model_path = JoinPath({model_repository_path, ModelNameDotToSlash(name)});
   std::set<std::string> subdirs;
   RETURN_IF_ERROR(GetDirectorySubdirs(model_path, &subdirs));
   std::set<int64_t, std::greater<int64_t>> existing_versions;
@@ -1649,12 +1649,16 @@ Status
 ModelRepositoryManager::RepositoryIndex(
     const bool ready_only, std::vector<ModelIndex>* index)
 {
+
   std::set<std::string> seen_models;
   std::set<std::string> duplicate_models;
   for (const auto& repository_path : repository_paths_) {
     std::set<std::string> subdirs;
-    RETURN_IF_ERROR(GetDirectorySubdirs(repository_path, &subdirs));
-    for (const auto& subdir : subdirs) {
+    RETURN_IF_ERROR(GetPossibleRepoDirs(repository_path, "", &subdirs));
+
+    for (const auto& subdir_slash : subdirs) {
+      std::string subdir = ModelNameSlashToDot(subdir_slash);
+
       if (seen_models.find(subdir) != seen_models.end()) {
         duplicate_models.insert(subdir);
       }
@@ -1727,16 +1731,21 @@ ModelRepositoryManager::Poll(
     std::set<std::string> duplicated_models;
     for (const auto& repository_path : repository_paths_) {
       std::set<std::string> subdirs;
-      Status status = GetDirectorySubdirs(repository_path, &subdirs);
+      Status status = GetPossibleRepoDirs(repository_path, "", &subdirs);
       if (!status.IsOk()) {
         LOG_ERROR << "failed to poll model repository '" << repository_path
                   << "': " << status.Message();
         *all_models_polled = false;
       } else {
         for (const auto& subdir : subdirs) {
-          if (!model_to_repository.emplace(subdir, repository_path).second) {
-            duplicated_models.insert(subdir);
-            *all_models_polled = false;
+          Status validity_status = ValidateModelName(subdir);
+          if (validity_status.IsOk()) {
+            if (!model_to_repository.emplace(subdir, repository_path).second) {
+              duplicated_models.insert(subdir);
+              *all_models_polled = false;
+            }
+          } else {
+            LOG_ERROR << "model name validation error " << status.Message();
           }
         }
       }
@@ -1753,14 +1762,15 @@ ModelRepositoryManager::Poll(
       bool exists = false;
       for (const auto repository_path : repository_paths_) {
         bool exists_in_this_repo = false;
-        const auto full_path = JoinPath({repository_path, model});
+        std::string model_path = ModelNameDotToSlash(model);
+        const auto full_path = JoinPath({repository_path, model_path}); // TODO: optimize this
         Status status = FileExists(full_path, &exists_in_this_repo);
         if (!status.IsOk()) {
           LOG_ERROR << "failed to poll model repository '" << repository_path
                     << "' for model '" << model << "': " << status.Message();
           *all_models_polled = false;
         } else if (exists_in_this_repo) {
-          auto res = model_to_repository.emplace(model, repository_path);
+          auto res = model_to_repository.emplace(model_path, repository_path);
           if (res.second) {
             exists = true;
           } else {
@@ -1796,7 +1806,7 @@ ModelRepositoryManager::Poll(
 
     auto model_poll_state = STATE_UNMODIFIED;
     auto full_path = JoinPath({repository, child});
-
+    auto model_name = ModelNameSlashToDot(child);
 
     std::unique_ptr<ModelInfo> model_info;
     const auto iitr = infos_.find(child);
@@ -1856,9 +1866,18 @@ ModelRepositoryManager::Poll(
         // If enabled, try to automatically generate missing parts of
         // the model configuration (autofill) from the model
         // definition. In all cases normalize and validate the config.
+        if (full_path.find(repository) != 0) {
+          return Status(
+            Status::Code::INVALID_ARG,
+            "model path " + full_path + 
+            " do not belong to repo " + repository +
+            ", check model agent");
+        }
+
+        auto ns_path = full_path.substr(repository.length() + 1);
         status = GetNormalizedModelConfig(
-            full_path, backend_config_map_, autofill_, min_compute_capability_,
-            &model_config);
+            full_path, ns_path, backend_config_map_, autofill_, 
+            min_compute_capability_, &model_config);
       }
       if (status.IsOk()) {
         // Note that the model inputs and outputs are not validated until
@@ -1876,12 +1895,12 @@ ModelRepositoryManager::Poll(
         // like good practice to require it of the user. It also acts as a
         // check to make sure we don't have two different models with the
         // same name.
-        if (model_config.name() != child) {
+        auto model_name_in_cfg = model_config.name();
+        if (model_name_in_cfg != model_name) {
           status = Status(
               Status::Code::INVALID_ARG,
-              "unexpected directory name '" + child + "' for model '" +
-                  model_config.name() +
-                  "', directory name must equal model name");
+              "model name '" + model_name_in_cfg + 
+              "' in config do not match '" + model_name);
         }
       }
 
@@ -1895,7 +1914,7 @@ ModelRepositoryManager::Poll(
     }
 
     if (model_poll_state != STATE_INVALID) {
-      const auto& ret = updated_infos->emplace(child, nullptr);
+      const auto& ret = updated_infos->emplace(model_name, nullptr);
       if (!ret.second) {
         return Status(
             Status::Code::ALREADY_EXISTS,
@@ -1904,13 +1923,13 @@ ModelRepositoryManager::Poll(
 
       if (model_poll_state == STATE_UNMODIFIED) {
         ret.first->second.reset(new ModelInfo(*iitr->second));
-        unmodified->insert(child);
+        unmodified->insert(model_name);
       } else {
         ret.first->second = std::move(model_info);
         if (model_poll_state == STATE_ADDED) {
-          added->insert(child);
+          added->insert(model_name);
         } else {
-          modified->insert(child);
+          modified->insert(model_name);
         }
       }
     }
@@ -2248,6 +2267,42 @@ ModelRepositoryManager::CheckNode(DependencyNode* node)
 #endif  // TRITON_ENABLE_ENSEMBLE
   }
   return node_ready;
+}
+
+template<class T>
+void ModelRepositoryManager::dump_set_element(const std::set<T>& set)
+{
+  std::stringstream buf;
+  buf << "[";
+  auto it = set.begin();
+  if (it != set.end()) {
+    buf << *it;
+    it++;
+  }
+  while (it != set.end()) {
+    buf << ", " << *it;
+    it++;
+  }
+  buf << "]";
+  LOG_INFO << buf.str();
+}
+
+template<class K, class V>
+void ModelRepositoryManager::dump_map_element(const std::map<K, V>& map)
+{
+  std::stringstream buf;
+  buf << "[";
+  auto it = map.begin();
+  if (it != map.end()) {
+    buf << "[" << it->first << ", " << it->second << "]";
+    it++;
+  }
+  while (it != map.end()) {
+    buf << ", [" << it->first << ", " << it->second << "]";
+    it++;
+  }
+  buf << "]";
+  LOG_INFO << buf.str();
 }
 
 }}  // namespace nvidia::inferenceserver

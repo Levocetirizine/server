@@ -1988,6 +1988,27 @@ GetDirectoryFiles(
 }
 
 Status
+GetPossibleRepoDirs(const std::string& path, const std::string& ns, std::set<std::string>* repodirs)
+{
+  auto full_path = JoinPath({path, ns});
+  std::set<std::string> subdirs;
+  GetDirectorySubdirs(full_path, &subdirs);
+  for (auto &subdir : subdirs) {
+    {
+      bool has_config;
+      RETURN_IF_ERROR(FileExists(JoinPath({full_path, subdir, kModelConfigPbTxt}), &has_config));
+      if (has_config) {
+        repodirs->insert(JoinPath({ns, subdir}));
+      } else {
+        RETURN_IF_ERROR(GetPossibleRepoDirs(path, JoinPath({ns, subdir}), repodirs));
+      }
+    }
+  }
+  return Status::Success;
+}
+
+
+Status
 ReadTextFile(const std::string& path, std::string* contents)
 {
   FileSystem* fs;

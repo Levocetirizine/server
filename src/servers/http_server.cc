@@ -2107,6 +2107,8 @@ HTTPAPIServer::HandleInfer(
     return;
   }
 
+  LOG_INFO << "handle infer for model " << model_name;
+
   bool connection_paused = false;
 
   int64_t requested_model_version;
