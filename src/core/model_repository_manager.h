@@ -203,14 +203,16 @@ class ModelRepositoryManager {
   /// \param model_name The model name of the backend handle.
   /// \param model_version The model version of the backend handle.
   /// \param backend Return the inference backend object.
+  /// \param enable_alias Enable alias substitution
   /// \return error status.
   Status GetInferenceBackend(
       const std::string& model_name, const int64_t model_version,
-      std::shared_ptr<InferenceBackend>* backend);
+      std::shared_ptr<InferenceBackend>* backend, bool enable_alias = false);
 
  private:
   struct ModelInfo;
   class BackendLifeCycle;
+  class AliasManager;
 
   // Map from model name to information about the model.
   using ModelInfoMap =
@@ -326,6 +328,7 @@ class ModelRepositoryManager {
       missing_nodes_;
 
   std::unique_ptr<BackendLifeCycle> backend_life_cycle_;
+  std::unique_ptr<AliasManager> alias_mgr_;
 
   template<class T>
   void dump_set_element(const std::set<T>& set);

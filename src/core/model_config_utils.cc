@@ -693,7 +693,7 @@ GetNormalizedModelConfig(
     if (config->has_ensemble_scheduling()) {
       for (auto& element : *(config->mutable_ensemble_scheduling()->mutable_step())) {
         const auto& old_name = element.model_name();
-        if(!old_name.empty() && old_name.find('.') == old_name.npos) {
+        if(!old_name.empty()) {
           if(ns_path.find('/') != ns_path.npos) {
             std::string ns = DirName(ns_path);
             std::string new_name = ModelNameSlashToDot(ns) + '.' + old_name;

@@ -126,6 +126,9 @@ Status GetDirectorySubdirs(
 Status GetPossibleRepoDirs(
     const std::string& path, const std::string& ns, std::set<std::string>* repodirs);
 
+bool IsPossibleRepoDir(
+    const std::string& path, const std::string& dir);
+
 /// Get the files contained in a directory.
 /// \param path The directory.
 /// \param skip_hidden_files Ignores the hidden files in the directory.

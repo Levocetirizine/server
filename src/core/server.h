@@ -236,7 +236,7 @@ class InferenceServer {
       return Status(Status::Code::UNAVAILABLE, "Server not ready");
     }
     return model_repository_manager_->GetInferenceBackend(
-        model_name, model_version, backend);
+        model_name, model_version, backend, true);
   }
 
  private:

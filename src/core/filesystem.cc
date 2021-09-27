@@ -2007,6 +2007,12 @@ GetPossibleRepoDirs(const std::string& path, const std::string& ns, std::set<std
   return Status::Success;
 }
 
+bool IsPossibleRepoDir(const std::string& path, const std::string& dir)
+{
+  bool has_config = false;
+  FileExists(JoinPath({path, dir, kModelConfigPbTxt}), &has_config);
+  return has_config;
+}
 
 Status
 ReadTextFile(const std::string& path, std::string* contents)

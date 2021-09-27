@@ -491,6 +491,135 @@ class ModelRepositoryManager::BackendLifeCycle {
 #endif  // TRITON_ENABLE_ENSEMBLE
 };
 
+class ModelRepositoryManager::AliasManager {
+  public:
+    AliasManager(const std::set<std::string>& repository_paths) : repository_paths_(repository_paths) {}
+    ~AliasManager() {}
+
+    std::string GetModelName(const std::string& name);
+    void LoadAliasModel(const std::string& name, std::set<std::string> *target_models);
+
+  private:
+    void LoadAliasModelHttp(const std::string& name, std::set<std::string> *target_models);
+    void LoadAliasModelGRpc(const std::string& name, std::set<std::string> *target_models);
+
+    std::mutex mu_;
+    std::map<std::string, std::string> alias_map_;
+    const std::set<std::string>& repository_paths_;
+};
+
+std::string
+ModelRepositoryManager::AliasManager::GetModelName(const std::string& name)
+{
+  std::lock_guard<decltype(mu_)> g(mu_);
+
+  if (!alias_map_.empty()) {
+    std::size_t pos = 0;
+    while (pos < name.length()) {
+      auto dot_pos = name.find_first_of('.', pos);
+      if (dot_pos == name.npos) break;
+      auto sub = name.substr(0, dot_pos);
+      auto it = alias_map_.find(sub);
+      if (it != alias_map_.end()) {
+        auto new_name = it->second + name.substr(dot_pos);
+        return new_name;
+      }
+      pos = dot_pos + 1;
+    }
+  }
+  return name;
+}
+
+/**
+ * %3A: colon : in http url
+ * %2C: comma , in http url
+ * 
+ * format: 
+ * ${model_name}
+ * ${nameapce_name}:${alias},${more_alias}... 
+ * 
+ */
+void
+ModelRepositoryManager::AliasManager::LoadAliasModel(const std::string& name, std::set<std::string> *target_models)
+{
+  LOG_VERBOSE(1) << "[ALIAS] parse loadmodel req: " << name;
+
+  auto url_colon_pos = name.find("%3A");
+  if (url_colon_pos != name.npos) {
+    LoadAliasModelHttp(name, target_models);
+    return;
+  }
+
+  auto colon_pos = name.find_first_of(':');
+  if (colon_pos != name.npos) {
+    LoadAliasModelGRpc(name, target_models);
+    return;
+  }
+
+  // plain model
+  target_models->insert(name);
+  return; 
+}
+
+void
+ModelRepositoryManager::AliasManager::LoadAliasModelHttp(
+  const std::string& name, std::set<std::string> *target_models)
+{
+  std::lock_guard<decltype(mu_)> g(mu_);
+  auto colon_pos = name.find("%3A");
+  auto ns_name = name.substr(0, colon_pos);
+  /* add all submodels in namespace */
+  for (const auto& repository_path : repository_paths_) {
+    std::set<std::string> subdirs;
+    GetPossibleRepoDirs(repository_path, ModelNameDotToSlash(ns_name), &subdirs);
+    for (const auto& subdir: subdirs) {
+      LOG_INFO << "[ALIAS] Add sub model " << subdir;
+      target_models->insert(ModelNameSlashToDot(subdir));
+    }
+  }
+
+  /* set alias to namespace */
+  auto alias_parse_idx = colon_pos + 3;
+  while (alias_parse_idx < name.length()) {
+    auto comma_pos = name.find("%2C", alias_parse_idx);
+    auto alias = name.substr(alias_parse_idx, comma_pos - alias_parse_idx);
+    LOG_INFO << "[ALIAS] Map alias " << alias << " to " << ns_name;
+    alias_map_[alias] = ns_name;
+    if (comma_pos == name.npos) break;
+    alias_parse_idx = comma_pos + 3;
+  }
+  return;
+}
+
+void ModelRepositoryManager::AliasManager::LoadAliasModelGRpc(
+  const std::string& name, std::set<std::string> *target_models)
+{
+  std::lock_guard<decltype(mu_)> g(mu_);
+  auto colon_pos = name.find_first_of(':');
+  auto ns_name = name.substr(0, colon_pos);
+  /* add all submodels in namespace */
+  for (const auto& repository_path : repository_paths_) {
+    std::set<std::string> subdirs;
+    GetPossibleRepoDirs(repository_path, ModelNameDotToSlash(ns_name), &subdirs);
+    for (const auto& subdir: subdirs) {
+      LOG_INFO << "[ALIAS] Add sub model " << subdir;
+      target_models->insert(ModelNameSlashToDot(subdir));
+    }
+  }
+
+  /* set alias to namespace */
+  auto alias_parse_idx = colon_pos + 1;
+  while (alias_parse_idx < name.length()) {
+    auto comma_pos = name.find_first_of(',', alias_parse_idx);
+    auto alias = name.substr(alias_parse_idx, comma_pos - alias_parse_idx);
+    LOG_INFO << "[ALIAS] Map alias " << alias << " to " << ns_name;
+    alias_map_[alias] = ns_name;
+    if (comma_pos == name.npos) break;
+    alias_parse_idx = comma_pos + 1;
+  }
+  return;
+}
+
 Status
 ModelRepositoryManager::BackendLifeCycle::Create(
     InferenceServer* server, const double min_compute_capability,
@@ -1287,6 +1416,8 @@ ModelRepositoryManager::Create(
           polling_enabled, model_control_enabled, min_compute_capability,
           std::move(life_cycle)));
 
+  local_manager->alias_mgr_ = std::unique_ptr<AliasManager>(new AliasManager(repository_paths));
+
   bool all_models_polled = true;
   if (!model_control_enabled) {
     // only error happens before model load / unload will be return
@@ -1449,7 +1580,7 @@ ModelRepositoryManager::LoadModelByDependency()
 
 Status
 ModelRepositoryManager::LoadUnloadModel(
-    const std::string& model_name, const ActionType type,
+    const std::string& old_model_name, const ActionType type,
     const bool unload_dependents)
 {
   if (!model_control_enabled_) {
@@ -1461,42 +1592,46 @@ ModelRepositoryManager::LoadUnloadModel(
   // Serialize all operations that change model state
   std::lock_guard<std::mutex> lock(poll_mu_);
 
+  std::set<std::string> target_models;
+  alias_mgr_->LoadAliasModel(old_model_name, &target_models);
+
   bool polled = true;
   RETURN_IF_ERROR(
-      LoadUnloadModels({model_name}, type, unload_dependents, &polled));
+      LoadUnloadModels(target_models, type, unload_dependents, &polled));
 
   // Check if model is loaded / unloaded properly
-  const auto version_states = backend_life_cycle_->VersionStates(model_name);
-  if (type == ActionType::LOAD) {
-    if (version_states.empty()) {
-      return Status(
-          Status::Code::INTERNAL,
-          "failed to load '" + model_name + "', no version is available");
-    }
-    auto it = infos_.find(model_name);
-    if (it == infos_.end()) {
-      return Status(
-          Status::Code::INTERNAL,
-          "failed to load '" + model_name +
-              "', failed to poll from model repository");
-    }
-  } else {
-    std::string ready_version_str;
-    for (const auto& version_state : version_states) {
-      if (version_state.second.first == ModelReadyState::READY) {
-        ready_version_str += std::to_string(version_state.first);
-        ready_version_str += ",";
+  for (const std::string model_name : target_models) {
+    const auto version_states = backend_life_cycle_->VersionStates(model_name);
+    if (type == ActionType::LOAD) {
+      if (version_states.empty()) {
+        return Status(
+            Status::Code::INTERNAL,
+            "failed to load '" + model_name + "', no version is available");
+      }
+      auto it = infos_.find(model_name);
+      if (it == infos_.end()) {
+        return Status(
+            Status::Code::INTERNAL,
+            "failed to load '" + model_name +
+                "', failed to poll from model repository");
+      }
+    } else {
+      std::string ready_version_str;
+      for (const auto& version_state : version_states) {
+        if (version_state.second.first == ModelReadyState::READY) {
+          ready_version_str += std::to_string(version_state.first);
+          ready_version_str += ",";
+        }
+      }
+      if (!ready_version_str.empty()) {
+        ready_version_str.pop_back();
+        return Status(
+            Status::Code::INTERNAL,
+            "failed to unload '" + model_name +
+                "', versions that are still available: " + ready_version_str);
       }
     }
-    if (!ready_version_str.empty()) {
-      ready_version_str.pop_back();
-      return Status(
-          Status::Code::INTERNAL,
-          "failed to unload '" + model_name +
-              "', versions that are still available: " + ready_version_str);
-    }
   }
-
   return Status::Success;
 }
 
@@ -1702,10 +1837,17 @@ ModelRepositoryManager::RepositoryIndex(
 Status
 ModelRepositoryManager::GetInferenceBackend(
     const std::string& model_name, const int64_t model_version,
-    std::shared_ptr<InferenceBackend>* backend)
+    std::shared_ptr<InferenceBackend>* backend, bool enable_alias)
 {
-  Status status = backend_life_cycle_->GetInferenceBackend(
+  Status status;
+  if (enable_alias) {
+    auto new_model_name = alias_mgr_->GetModelName(model_name);
+    status = backend_life_cycle_->GetInferenceBackend(
+      new_model_name, model_version, backend);
+  } else {
+    status = backend_life_cycle_->GetInferenceBackend(
       model_name, model_version, backend);
+  }
   if (!status.IsOk()) {
     backend->reset();
     status = Status(
